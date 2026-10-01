@@ -1,0 +1,7 @@
+services:
+  sparkdash:
+    volumes:
+      - ${HOME}/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+      - ${HOME}/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+    environment:
+      SSH_IDENTITY_FILE: /root/.ssh/id_ed25519
