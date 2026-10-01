@@ -429,6 +429,14 @@ function startMonitor(spark) {
     resolveHeadModelId: (headId) => monitors.get(headId)?.headLlmModelId() ?? null,
     // Settings → Poll interval drives the collectors, not just the broadcast.
     pollIntervalMs: getSettings().pollIntervalMs,
+    // Lane auto-discovery found a live engine on an unconfigured port and
+    // adopted the shared fleet key — persist it in the encrypted secrets
+    // store so the full LlmProbe authenticates on its next tick. Key is
+    // NEVER written to sparks.json (secretsStore only).
+    onLlmPortDiscovered: (sparkId, port, apiKey) => {
+      registry.setLlmApiKey(sparkId, port, apiKey);
+      forceBroadcast();
+    },
   });
   monitors.set(spark.id, monitor);
   monitor.start();

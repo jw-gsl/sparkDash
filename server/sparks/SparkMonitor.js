@@ -90,9 +90,95 @@ export function livenessReason(err) {
 
 const ONLINE_GRACE_MS = 10000;
 
+/** Auto-discovery kill-switch (LLM_AUTO_DISCOVER=0 disables). */
+const LLM_AUTO_DISCOVER =
+  !["0", "false", "off"].includes(
+    String(process.env.LLM_AUTO_DISCOVER ?? "1").trim().toLowerCase(),
+  );
+/** Candidate env file listing the active lane port (dspark single source of truth). */
+const LLM_ENV_FILE_CANDIDATES = [
+  "/host/root/home/jw-vol/dspark-model-control/.env.dspark",
+  "/host/root/home/jw-vol/deepseek-v4-spark/.env.dspark",
+];
+/**
+ * Shared fleet API key cache (same key rotates across local lanes). Entries:
+ * { key, expiresAt }. Never persisted here — persistence goes through the
+ * registry callback so it lands in the encrypted secrets store.
+ */
+const _fleetKey = { value: null, expiresAt: 0 };
+const FLEET_KEY_TTL_MS = 10 * 60 * 1000;
+
+export function readEnvFileLanePort() {
+  for (const p of LLM_ENV_FILE_CANDIDATES) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      const txt = fs.readFileSync(p, "utf8");
+      const m = txt.match(/^VLLM_PORT=(\d{1,5})$/m);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+  return null;
+}
+
+export function loadFleetKey() {
+  if (_fleetKey.value && Date.now() < _fleetKey.expiresAt) return _fleetKey.value;
+  for (const p of LLM_ENV_FILE_CANDIDATES) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      const txt = fs.readFileSync(p, "utf8");
+      const m = txt.match(/^VLLM_API_KEY=(\S+)$/m);
+      if (m && m[1].trim()) {
+        _fleetKey.value = m[1].trim();
+        _fleetKey.expiresAt = Date.now() + FLEET_KEY_TTL_MS;
+        return _fleetKey.value;
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+  return _fleetKey.value; // stale-but-usable beats nothing
+}
+
+/**
+ * Lightweight /v1/models GET — the only request the discovery scan makes.
+ * @returns {Promise<number>} HTTP status (0 on network failure)
+ */
+async function fetchLlmProbeStatus(host, port, apiKey) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 2500);
+  try {
+    const headers = {};
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const res = await fetch(`http://${host}:${port}/v1/models`, {
+      signal: controller.signal,
+      headers,
+    });
+    return res.status;
+  } catch {
+    return 0;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 /**
  * SparkMonitor — one per Spark. Owns collectors + rate state + poll loop.
  * Exposes snapshot() for WebSocket pushed payload.
+ *
+ * LLM lane auto-discovery (head/standalone sparks): besides the configured
+ * llmPorts, the monitor periodically scans a small candidate set — the
+ * env-file VLLM_PORT (the dspark harness's active lane), the default LLM_PORT,
+ * and any port that already has a stored API key — using a lightweight
+ * /v1/models request. When a candidate answers, it is surfaced as an extra
+ * live LLM panel (and its API key, if the scan had to adopt one, is persisted
+ * via the onLlmPortDiscovered callback). This makes model swaps that change
+ * the served port (8888 DeepSeek ⇄ 8889 Qwen ⇄ 8890 GLM) self-healing without
+ * touching dashboard config. Disable with LLM_AUTO_DISCOVER=0 (env).
  */
 /** A finding stays this long after its rule last raised it, so a reading near a threshold does not flap. */
 export const HEALTH_CLEAR_HOLD_MS = 90_000;
@@ -136,13 +222,23 @@ export class SparkMonitor {
       typeof options.resolveHeadModelId === "function" ? options.resolveHeadModelId : null;
     this.collector = new SystemCollector(spark);
 
-    // One LlmProbe per port — none when LLM monitoring is off
+    // One LLM probe per port — none when LLM monitoring is off
     this.llmProbes = new Map();
     if (this._llmMonitoringEnabled(spark)) {
       for (const port of this._llmPorts()) {
         this.llmProbes.set(port, new LlmProbe(spark, port));
       }
     }
+
+    // Lane auto-discovery (head/standalone only, when enabled):
+    // ports surfaced by the scan that are NOT in config llmPorts.
+    this._discoveredPorts = new Set();
+    this._lastScanAt = 0;
+    this._scanInflight = false;
+    this._onLlmPortDiscovered =
+      typeof options.onLlmPortDiscovered === "function"
+        ? options.onLlmPortDiscovered
+        : null;
 
     /** @type {ComfyProbe | null} */
     this.comfyProbe = this._comfyMonitoringEnabled(spark)
@@ -267,14 +363,22 @@ export class SparkMonitor {
     this.spark = spark;
     this.collector.spark = spark;
 
-    // Rebuild LLM probe map — add new ports, remove stale ones, update existing
-    const ports = this._llmMonitoringEnabled() ? this._llmPorts() : [];
+    // Rebuild LLM probe map — add new ports, remove stale ones, update
+    // existing. Config ports first (order = frontend panel order), then any
+    // auto-discovered lanes that are not already in config (discovery is
+    // display-only and survives config hot-updates).
+    const cfgPorts = this._llmMonitoringEnabled() ? this._llmPorts() : [];
+    const ports = this._llmMonitoringEnabled()
+      ? [...cfgPorts, ...Array.from(this._discoveredPorts).filter((p) => !cfgPorts.includes(p))]
+      : [];
+    if (!this._llmMonitoringEnabled()) this._discoveredPorts = new Set();
     const prevProbes = this.llmProbes;
     this.llmProbes = new Map();
     for (const port of ports) {
       const existing = prevProbes.get(port);
       if (existing) {
         existing.spark = spark;
+        existing.setPort(port);
         this.llmProbes.set(port, existing);
       } else {
         this.llmProbes.set(port, new LlmProbe(spark, port));
@@ -283,6 +387,7 @@ export class SparkMonitor {
     for (const [port, probe] of prevProbes) {
       if (!this.llmProbes.has(port)) probe.dispose?.();
     }
+    for (const p of cfgPorts) this._discoveredPorts.delete(p);
     if (!this._llmMonitoringEnabled()) {
       this._metrics.llm = [];
     }
@@ -588,6 +693,135 @@ export class SparkMonitor {
     }
   }
 
+  /**
+   * Kick off a lane-discovery scan at most once every 15 s (fire-and-forget).
+   * Only for local head/standalone sparks with LLM monitoring on.
+   */
+  _maybeDiscoverLane() {
+    if (!LLM_AUTO_DISCOVER || this._scanInflight || !this._running) return;
+    if (!this.spark?.isLocal || !this._llmMonitoringEnabled()) return;
+    const now = Date.now();
+    if (now - this._lastScanAt < 15_000) return;
+    this._lastScanAt = now;
+    this._scanInflight = true;
+    this._scanLanes().catch((err) => {
+      console.error(`[SparkMonitor] ${this.spark?.id} lane discovery error:`, err?.message || err);
+    }).finally(() => {
+      this._scanInflight = false;
+    });
+  }
+
+  /**
+   * Scan candidate ports not already covered by a probe; surface any that
+   * answer /v1/models. Candidates: the dspark env-file VLLM_PORT (single
+   * source of truth for the active lane), default LLM_PORT, and every port
+   * with a stored API key. A 200 (open) or 401 (protected) means an engine
+   * is serving there.
+   *
+   * API key bootstrap: a 401 without a stored key makes the scan try the
+   * shared fleet key from the env file; on success it notifies
+   * onLlmPortDiscovered(sparkId, port, key) so index.js persists it in the
+   * encrypted secrets store.
+   */
+  async _scanLanes() {
+    const spark = this.spark;
+    const host = spark.lanIp || "127.0.0.1";
+    const keys = spark.llmApiKeys || {};
+    const candidates = new Set();
+    const envPort = readEnvFileLanePort();
+    if (envPort) candidates.add(envPort);
+    candidates.add(LLM_PORT);
+    for (const k of Object.keys(keys)) {
+      const n = parseInt(k, 10);
+      if (Number.isInteger(n)) candidates.add(n);
+    }
+    // Drop anything already covered by a configured or discovered probe
+    for (const p of this.llmProbes.keys()) candidates.delete(p);
+    if (candidates.size === 0) {
+      // Nothing new to look for — but prune stale discovered ports that
+      // stopped serving so a stopped lane doesn't linger forever.
+      await this._pruneDiscovered();
+      return;
+    }
+
+    for (const port of candidates) {
+      const storedKey =
+        keys[String(port)] != null ? String(keys[String(port)]).trim() : "";
+      let status = await fetchLlmProbeStatus(
+        spark.isLocal ? "127.0.0.1" : host,
+        port,
+        storedKey || null,
+      );
+      let adoptedKey = null;
+      if (status === 401 && !storedKey) {
+        const fleet = loadFleetKey();
+        if (fleet) {
+          const s2 = await fetchLlmProbeStatus(
+            spark.isLocal ? "127.0.0.1" : host,
+            port,
+            fleet,
+          );
+          if (s2 === 200) {
+            status = 200;
+            adoptedKey = fleet;
+          }
+        }
+      }
+      if (status !== 200 && status !== 401) continue;
+
+      // Lane is live — create its probe, surface it, adopt key if needed
+      const probe = new LlmProbe(spark, port);
+      if (adoptedKey) {
+        spark.llmApiKeys = { ...(spark.llmApiKeys || {}), [String(port)]: adoptedKey };
+        probe.spark = spark;
+        try {
+          if (this._onLlmPortDiscovered) {
+            this._onLlmPortDiscovered(spark.id, port, adoptedKey);
+          }
+        } catch (err) {
+          console.error(
+            `[SparkMonitor] ${spark.id} discovery key-persist failed for :${port}:`,
+            err?.message || err,
+          );
+        }
+      }
+      this.llmProbes.set(port, probe);
+      this._discoveredPorts.add(port);
+      console.log(
+        `[SparkMonitor] ${spark.id} discovered LLM lane :${port}${adoptedKey ? " (adopted fleet key)" : ""}`,
+      );
+    }
+    await this._pruneDiscovered();
+  }
+
+  /** Drop discovered ports whose server stopped answering (config ports stay). */
+  async _pruneDiscovered() {
+    if (this._discoveredPorts.size === 0) return;
+    const host = this.spark.isLocal ? "127.0.0.1" : this.spark.lanIp || "127.0.0.1";
+    const keys = this.spark.llmApiKeys || {};
+    for (const port of Array.from(this._discoveredPorts)) {
+      const key = keys[String(port)] != null ? String(keys[String(port)]).trim() : "";
+      const status = await fetchLlmProbeStatus(host, port, key || null);
+      if (status === 200 || status === 401) continue;
+      this._discoveredPorts.delete(port);
+      const probe = this.llmProbes.get(port);
+      if (probe) {
+        try {
+          probe.dispose?.();
+        } catch {
+          /* ignore */
+        }
+        this.llmProbes.delete(port);
+      }
+      // Drop the transient metrics slot too so snapshot zipping stays clean
+      if (Array.isArray(this._metrics.llm)) {
+        const idx = Array.from(this.llmProbes.keys()).length;
+        if (this._metrics.llm.length > idx) this._metrics.llm = this._metrics.llm.slice(0, idx);
+      }
+      console.log(`[SparkMonitor] ${this.spark.id} dropped discovered LLM lane :${port}`);
+    }
+  }
+
   /** Start background polling. */
   start() {
     if (this._running) return;
@@ -669,7 +903,9 @@ export class SparkMonitor {
       workerDerivedLabel: this.workerDerivedLabel(),
       llmMonitoring: this._llmMonitoringEnabled(),
       llmPort: ports[0] ?? LLM_PORT,
-      llmPorts: ports,
+      // Include auto-discovered lanes (probe map is the truth for zipping
+      // with metrics.llm); config ports keep their order first.
+      llmPorts: Array.from(this.llmProbes.keys()),
       llmApiKeyPorts: Array.isArray(this.spark.llmApiKeyPorts)
         ? this.spark.llmApiKeyPorts
         : Object.keys(this.spark.llmApiKeys || {})
@@ -1031,12 +1267,19 @@ export class SparkMonitor {
         case "memory":
           result = await this.collector.collectUnifiedMemory();
           break;
-        case "llm":
+        case "llm": {
+          // Lane auto-discovery: cheap env-file + /v1/models scan may add a
+          // probe for a port that started serving since config was written.
+          this._maybeDiscoverLane();
+          // Snapshot the probe list up-front: discovery is fire-and-forget
+          // and must not shift indices mid-tick.
+          const tickProbes = Array.from(this.llmProbes.values());
           // Probe all ports in parallel
-          result = await Promise.all(
-            Array.from(this.llmProbes.values()).map((probe) => probe.probe())
-          );
+          result = await Promise.all(tickProbes.map((probe) => probe.probe()));
+          // Tag results with ports; the write-back stage maps to LlmDaily
+          this._lastLlmTickPorts = tickProbes.map((p) => p.port);
           break;
+        }
         case "comfy":
           result = this.comfyProbe ? await this.comfyProbe.probe() : null;
           break;
@@ -1097,12 +1340,13 @@ export class SparkMonitor {
           break;
         case "llm":
           {
-            const probes = Array.from(this.llmProbes.values());
+            const ports = this._lastLlmTickPorts || [];
+            const probes = ports.map((p) => this.llmProbes.get(p));
             this._metrics.llm = this._stampLlmLastActive(probes, result);
             this._updateHealth();
             for (let i = 0; i < result.length; i++) {
-              const probe = probes[i];
-              if (probe) llmDaily.record(this.spark.id, probe.port, result[i]);
+              const port = ports[i];
+              if (port != null) llmDaily.record(this.spark.id, port, result[i]);
             }
           }
           break;
