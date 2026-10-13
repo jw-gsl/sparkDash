@@ -25,6 +25,10 @@ import type { BenchKind } from "./BenchSwitcher";
 import { engineStateLabel } from "./llmEngineState";
 import { idleLabel, isLlmIdle } from "../../shared/llmIdle";
 
+/** Samples averaged for the per-agent rate, and how long the endpoint must stay idle before saying so. */
+const PER_AGENT_WINDOW = 5;
+const IDLE_HOLD_MS = 10_000;
+
 interface LlmPanelProps {
   llm: LlmMetrics | null;
   sparkId: string;
@@ -434,12 +438,24 @@ export function LlmPanel({
   const cachedPrefillTps = llm?.cachedPrefillTps ?? 0;
   const uncachedPrefillTps = llm?.uncachedPrefillTps ?? 0;
   const available = llm?.available ?? false;
-  // While nothing is flowing, say when the endpoint last served.
+  // One status line under avg · max: the per-agent decode share while requests are running, or
+  // "Idle · last served …" once nothing has run for a while. Both are smoothed: the per-poll
+  // rate flips between positive and 0 within a busy stretch, which used to swap the two lines.
   const running = llm?.requestsRunning ?? 0;
-  const perAgentTps = running >= 1 && generationTps > 0 ? generationTps / running : null;
-  const idleNote = available && isLlmIdle({ generationTps, prefillTps, prefillActive: llm?.prefillActive })
-    ? idleLabel(llm?.lastActiveAt)
-    : null;
+  const recentGen = genHistory.slice(-PER_AGENT_WINDOW).filter((v) => v > 0);
+  const recentGenAvg = recentGen.length ? recentGen.reduce((a, v) => a + v, 0) / recentGen.length : 0;
+  const perAgentTps = available && running >= 1 && recentGenAvg > 0 ? recentGenAvg / running : null;
+  const idleNow =
+    available &&
+    running < 1 &&
+    isLlmIdle({ generationTps, prefillTps, prefillActive: llm?.prefillActive });
+  const idleSinceRef = useRef<number | null>(null);
+  if (!idleNow) idleSinceRef.current = null;
+  else if (idleSinceRef.current == null) idleSinceRef.current = Date.now();
+  const idleNote =
+    idleNow && idleSinceRef.current != null && Date.now() - idleSinceRef.current >= IDLE_HOLD_MS
+      ? idleLabel(llm?.lastActiveAt)
+      : null;
 
   // Keep draft in sync when server pushes a different port (other tab / reload)
   useEffect(() => {
@@ -775,26 +791,18 @@ export function LlmPanel({
                   avg {fmtAvg(genAvg)}{genMax > 0 && <> · max {fmtAvg(genMax)}</>}
                 </span>
               )}
-              {/* Live decode rate split across the requests running right now (the engine reports
-                  one aggregate rate, so this is an even share, not a per-request measurement). */}
+              {/* One reserved line so the block keeps its height. Per-agent is an even share of the
+                  engine's aggregate rate (it reports no per-request rate). */}
               {available && (
                 perAgentTps != null ? (
                   <span
                     className="sp-avg mono"
                     data-llm-per-agent
-                    title="Decode tok/s divided by the number of running requests. An average share; individual requests vary."
+                    title="Decode tok/s (recent average) divided by the number of running requests. An average share; individual requests vary."
                   >
-                    per agent {fmtAvg(perAgentTps)} tok/s · {Math.round(llm?.requestsRunning ?? 0)} running
+                    per agent {fmtAvg(perAgentTps)} tok/s · {Math.round(running)} running
                   </span>
-                ) : (
-                  <span className="sp-avg invisible" aria-hidden="true">
-                    &nbsp;
-                  </span>
-                )
-              )}
-              {/* Always rendered so the block keeps its height as traffic starts and stops. */}
-              {available && (
-                idleNote ? (
+                ) : idleNote ? (
                   <span className="sp-avg" data-llm-idle>
                     {idleNote}
                   </span>
