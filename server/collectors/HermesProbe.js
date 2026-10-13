@@ -171,9 +171,16 @@ function buildHermesCmd(spark, actionCmd) {
   ].join("; ");
 }
 
-const CHECK_ACTION = `"$BIN" update --check 2>&1`;
+// Hosts that carry local hermes patches install `hermes-safe-update`, which rebases
+// them onto upstream, tests, and only then installs (plain `hermes update` resets to
+// the fork and drops local commits). Use it whenever it is on PATH.
+const SAFE_UPDATE = "hermes-safe-update";
+const HAS_SAFE = `command -v ${SAFE_UPDATE} >/dev/null 2>&1`;
+const SAFE_OK = "SAFE-UPDATE OK";
+const SAFE_FAILED = "SAFE-UPDATE FAILED";
+const CHECK_ACTION = `if ${HAS_SAFE}; then ${SAFE_UPDATE} --check 2>&1; else "$BIN" update --check 2>&1; fi`;
 // stdin from /dev/null guarantees EOF → non-interactive update.
-const UPDATE_ACTION = `"$BIN" update 2>&1 < /dev/null`;
+const UPDATE_ACTION = `if ${HAS_SAFE}; then ${SAFE_UPDATE} 2>&1 < /dev/null; else "$BIN" update 2>&1 < /dev/null; fi`;
 
 /**
  * Parse the `hermes update --check` section of the combined output.
@@ -393,11 +400,14 @@ export class HermesProbe {
     const repo = `/home/${user}/.hermes/hermes-agent`;
     const script = [
       `REPO='${repo}'`,
-      `git -C "$REPO" fetch origin --quiet 2>/dev/null || true`,
+      // Patched hosts (hermes-safe-update) track upstream directly; others track the fork.
+      `export PATH="/home/${user}/.local/bin:$PATH"`,
+      `if ${HAS_SAFE}; then R=upstream; else R=origin; fi`,
+      `git -C "$REPO" fetch "$R" main --quiet 2>/dev/null || true`,
       `echo __COMMITS__`,
-      `git -C "$REPO" log -30 --oneline --format=%H%x09%s HEAD..origin/main 2>/dev/null`,
+      `git -C "$REPO" log -30 --oneline --format=%H%x09%s HEAD.."$R"/main 2>/dev/null`,
       `echo __COUNT__`,
-      `git -C "$REPO" rev-list --count HEAD..origin/main 2>/dev/null`,
+      `git -C "$REPO" rev-list --count HEAD.."$R"/main 2>/dev/null`,
       `echo __HEAD__`,
       `git -C "$REPO" rev-parse --short HEAD 2>/dev/null`,
       `exit 0`,
@@ -474,9 +484,14 @@ export class HermesProbe {
         };
       }
       const launchBroken = out.includes(HERMES_LAUNCH_FAIL);
+      // hermes-safe-update ends with an explicit verdict line; trust it over keyword sniffing
+      // (its log-tail legitimately contains words like "failed" on a successful run).
+      const safeVerdict = out.includes(SAFE_FAILED) ? "failed" : out.includes(SAFE_OK) ? "ok" : null;
       const looksFailed =
         launchBroken ||
-        (/error|traceback|failed/i.test(out) && !/already up to date/i.test(out));
+        (safeVerdict
+          ? safeVerdict === "failed"
+          : /error|traceback|failed/i.test(out) && !/already up to date/i.test(out));
       return {
         ok: !looksFailed,
         installed: true,
@@ -484,7 +499,8 @@ export class HermesProbe {
         error: launchBroken
           ? "hermes is installed but cannot launch (broken install — the automatic repair could not fix it; reinstall hermes manually)."
           : looksFailed
-            ? out.trim().slice(-500) || "hermes update reported an error"
+            ? (safeVerdict === "failed" && out.slice(out.lastIndexOf(SAFE_FAILED)).split("\n")[0]) ||
+              out.trim().slice(-500) || "hermes update reported an error"
             : null,
         output: out.slice(-2000),
         startedAt,

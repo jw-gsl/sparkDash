@@ -310,3 +310,58 @@ test("requireDrop refuses to fall back to root when the user cannot be resolved"
   // Default (Hermes) behaviour is unchanged.
   assert.equal(chooseLocalInvocation({ ...base, requireDrop: false, passwdText, user: "" }).file, "nsenter");
 });
+
+const SAFE_UPDATE_HEAD = ["HERMES_BIN=/home/mia/.local/bin/hermes", "Hermes Agent v0.20.4 (2026.8.18)", "__CHECK_PHASE__"];
+
+test("update() and check() prefer hermes-safe-update when it is installed", async () => {
+  const probe = probeReturning([...SAFE_UPDATE_HEAD, "Already up to date", "__CHECK_EXIT__0"].join("\n"));
+  const cmds = [];
+  const run = probe._run;
+  probe._run = async (cmd, ...rest) => (cmds.push(cmd), run(cmd, ...rest));
+  await probe.check();
+  await probe.update();
+  assert.match(cmds[0], /command -v hermes-safe-update.*hermes-safe-update --check.*else "\$BIN" update --check/);
+  assert.match(cmds[1], /hermes-safe-update 2>&1 < \/dev\/null; else "\$BIN" update 2>&1 < \/dev\/null/);
+});
+
+test("update() trusts the SAFE-UPDATE OK verdict despite 'failed' words in the log tail", async () => {
+  const out = [
+    ...SAFE_UPDATE_HEAD,
+    "✓ tests passed (120 passed)",
+    "  ✗ Failed to fetch upstream. Skipping upstream sync.",
+    "SAFE-UPDATE OK: Hermes updated to 087c010b0c with ember patches; gateway running",
+    "__CHECK_EXIT__0",
+  ].join("\n");
+  const res = await probeReturning(out).update();
+  assert.equal(res.ok, true);
+  assert.equal(res.error, null);
+});
+
+test("update() reports the SAFE-UPDATE FAILED line as the error", async () => {
+  const out = [
+    ...SAFE_UPDATE_HEAD,
+    "SAFE-UPDATE FAILED: ember patches conflict with upstream in: plugins/platforms/mattermost/adapter.py . Nothing changed",
+    "__CHECK_EXIT__1",
+  ].join("\n");
+  const res = await probeReturning(out).update();
+  assert.equal(res.ok, false);
+  assert.match(res.error, /^SAFE-UPDATE FAILED: ember patches conflict/);
+  assert.doesNotMatch(res.error, /__CHECK_EXIT__/);
+});
+
+test("check() parses hermes-safe-update's update-available line", async () => {
+  const out = [...SAFE_UPDATE_HEAD, "⚠ Update available: 42 commits behind upstream/main", "__CHECK_EXIT__1"].join("\n");
+  const res = await probeReturning(out).check();
+  assert.equal(res.updateAvailable, true);
+  assert.equal(res.behindCommits, 42);
+});
+
+test("pendingCommits() compares against upstream when hermes-safe-update is installed", async () => {
+  const probe = probeReturning(["__COMMITS__", "__COUNT__", "0", "__HEAD__", "f00bad"].join("\n"));
+  let script = "";
+  const run = probe._run;
+  probe._run = async (cmd, ...rest) => ((script = cmd), run(cmd, ...rest));
+  await probe.pendingCommits();
+  assert.match(script, /if command -v hermes-safe-update >\/dev\/null 2>&1; then R=upstream; else R=origin; fi/);
+  assert.match(script, /HEAD\.\."\$R"\/main/);
+});
