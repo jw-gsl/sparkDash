@@ -763,10 +763,17 @@ export function LlmPanel({
               </div>
               <TrendLine data={genHistory} height={44} color="var(--color-accent)" />
               {genAvg != null && <span className="sp-avg mono">avg {fmtAvg(genAvg)}</span>}
-              {idleNote && (
-                <span className="sp-avg" data-llm-idle>
-                  {idleNote}
-                </span>
+              {/* Always rendered so the block keeps its height as traffic starts and stops. */}
+              {available && (
+                idleNote ? (
+                  <span className="sp-avg" data-llm-idle>
+                    {idleNote}
+                  </span>
+                ) : (
+                  <span className="sp-avg invisible" aria-hidden="true">
+                    &nbsp;
+                  </span>
+                )
               )}
             </div>
             <div
@@ -819,6 +826,9 @@ export function LlmPanel({
               </div>
             </div>
           )}
+
+          <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
+          <LlmTrendChart sparkId={sparkId} llmPort={llmPort} />
 
           <div className="sp-tiles">
             {showEngineTiles && kvValue != null && tile("kvCache", "KV cache", kvValue, { tone: kvTone, sub: kvSub || undefined })}
@@ -912,8 +922,6 @@ export function LlmPanel({
               <PostureBadge posture={llm.posture} />
             </div>
           )}
-          <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
-          <LlmTrendChart sparkId={sparkId} llmPort={llmPort} />
           <LlmTokenTotals sparkId={sparkId} llmPort={llmPort} />
         </div>
       )}
