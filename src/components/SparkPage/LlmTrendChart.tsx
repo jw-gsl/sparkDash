@@ -79,6 +79,12 @@ function windowed(data: readonly number[]): readonly number[] {
  * tracks. The busy-sample TTFT average badge is the useful signal and reads the
  * sparse series directly (no x-axis involved).
  */
+/** Highest sample, or null when there is nothing above zero. */
+function peak(xs: readonly number[]): number | null {
+  const m = xs.length ? Math.max(...xs) : 0;
+  return m > 0 ? m : null;
+}
+
 export function LlmTrendChart({
   sparkId,
   llmPort,
@@ -95,6 +101,10 @@ export function LlmTrendChart({
   const genAvg = useMemo(() => avgPositive(gen), [gen]);
   const prefillAvg = useMemo(() => avgPositive(prefill), [prefill]);
   const ttftAvg = useMemo(() => avgPositive(ttft), [ttft]);
+  // Peaks over the same full series as the averages.
+  const genPeak = useMemo(() => peak(gen), [gen]);
+  const prefillPeak = useMemo(() => peak(prefill), [prefill]);
+  const ttftPeak = useMemo(() => peak(ttft), [ttft]);
 
   // Chart draws only the newest hour; averages above use the full series.
   const genWin = useMemo(() => windowed(gen), [gen]);
@@ -160,16 +170,19 @@ export function LlmTrendChart({
         <span>
           Gen avg{" "}
           <span className="mono text-accent">{fmt(genAvg)}</span>
+          {genPeak != null && <> · max <span className="mono text-accent">{fmt(genPeak)}</span></>}
         </span>
         <span>
           Prefill avg{" "}
           <span className="mono text-text">{fmt(prefillAvg)}</span>
+          {prefillPeak != null && <> · max <span className="mono text-text">{fmt(prefillPeak)}</span></>}
         </span>
         <span>
           TTFT avg{" "}
           <span className="mono">
             {ttftAvg != null ? `${ttftAvg.toFixed(3)}s` : "—"}
           </span>
+          {ttftPeak != null && <> · max <span className="mono">{ttftPeak.toFixed(3)}s</span></>}
         </span>
         <span>avg over busy samples only</span>
       </div>
