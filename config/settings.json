@@ -8,5 +8,17 @@
   "density": "compact",
   "showFleetEnergy": true,
   "showFleetExceptions": false,
-  "showOverviewSearch": false
+  "showOverviewSearch": false,
+  "showLlmTokenTotals": true,
+  "showKpiDecode": true,
+  "showKpiPower": true,
+  "showKpiMemory": true,
+  "showKpiTokens": true,
+  "showActivityFeed": true,
+  "benchShareImage": true,
+  "timeZone": "",
+  "energyPricePerKwh": 0.3,
+  "energyCurrency": "£",
+  "showVramBreakdown": true,
+  "prometheusExport": false
 }
