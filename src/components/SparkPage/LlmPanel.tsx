@@ -435,6 +435,8 @@ export function LlmPanel({
   const uncachedPrefillTps = llm?.uncachedPrefillTps ?? 0;
   const available = llm?.available ?? false;
   // While nothing is flowing, say when the endpoint last served.
+  const running = llm?.requestsRunning ?? 0;
+  const perAgentTps = running >= 1 && generationTps > 0 ? generationTps / running : null;
   const idleNote = available && isLlmIdle({ generationTps, prefillTps, prefillActive: llm?.prefillActive })
     ? idleLabel(llm?.lastActiveAt)
     : null;
@@ -772,6 +774,23 @@ export function LlmPanel({
                 <span className="sp-avg mono">
                   avg {fmtAvg(genAvg)}{genMax > 0 && <> · max {fmtAvg(genMax)}</>}
                 </span>
+              )}
+              {/* Live decode rate split across the requests running right now (the engine reports
+                  one aggregate rate, so this is an even share, not a per-request measurement). */}
+              {available && (
+                perAgentTps != null ? (
+                  <span
+                    className="sp-avg mono"
+                    data-llm-per-agent
+                    title="Decode tok/s divided by the number of running requests. An average share; individual requests vary."
+                  >
+                    per agent {fmtAvg(perAgentTps)} tok/s · {Math.round(llm?.requestsRunning ?? 0)} running
+                  </span>
+                ) : (
+                  <span className="sp-avg invisible" aria-hidden="true">
+                    &nbsp;
+                  </span>
+                )
               )}
               {/* Always rendered so the block keeps its height as traffic starts and stops. */}
               {available && (
