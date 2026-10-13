@@ -33,6 +33,7 @@ import {
   PanelLeftIcon,
   TokensIcon,
 } from "./components/ui/icons";
+import { PanelCollapseControls } from "./components/ui/PanelCollapseControls";
 import { ConnectionBanner } from "./components/ui/ConnectionBanner";
 import { ErrorBanner } from "./components/ui/ErrorBanner";
 import {
@@ -527,6 +528,7 @@ function DashboardApp() {
             <button type="button" className="search-trigger" onClick={() => setShowPalette(true)} aria-label="Open command palette">
               <SearchIcon className="h-4 w-4" />
             </button>
+            <PanelCollapseControls />
             <ThemeSwitch />
           </header>
           <div className={`app-content${activeId === SHOWCASE_ID ? " app-content--wide" : ""}`}>

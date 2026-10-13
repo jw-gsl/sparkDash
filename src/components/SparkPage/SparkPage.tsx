@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type CSSProperties, type ReactNode } from "react";
+import { useState, useEffect, useCallback, type ReactNode } from "react";
 import type { SparkSnapshot } from "../../api/types";
 import { isLlmMonitoringEnabled } from "../../api/sparkRole";
 import { updateSpark, refreshSparkMetric, addLlmPort, removeLlmPort } from "../../api/client";
@@ -11,6 +11,7 @@ import { RamPanel } from "./RamPanel";
 import { StoragePanel } from "./StoragePanel";
 import { NetworkPanel } from "./NetworkPanel";
 import { TailscalePanel } from "./TailscalePanel";
+import { SparkLayout, type LayoutBlock } from "./SparkLayout";
 import { LlmPanel } from "./LlmPanel";
 import { ComfyPanel } from "./ComfyPanel";
 import { LlmModelsPanel } from "./LlmModelsPanel";
@@ -32,15 +33,6 @@ interface SparkPageProps {
 }
 
 type SparkView = "all" | "resources" | "services";
-
-/** Panel wrapper carrying its single-column (mobile) order as a CSS variable. */
-function Item({ order, children }: { order: number; children: ReactNode }) {
-  return (
-    <div className="sp-item" style={{ ["--o" as string]: order } as CSSProperties}>
-      {children}
-    </div>
-  );
-}
 
 export function SparkPage({
   spark,
@@ -248,6 +240,71 @@ export function SparkPage({
     />
   ) : null;
 
+  // Every block is draggable; `col` + array order is the default arrangement. Narrow screens
+  // stack everything in `mobileOrder` (GPU, memory, LLM first) until the user reorders.
+  const blocks: LayoutBlock[] = [];
+  const add = (id: string, col: LayoutBlock["col"], size: LayoutBlock["size"], mobileOrder: number, node: ReactNode) =>
+    blocks.push({ id, col, size, mobileOrder, node });
+  add(
+    "gpu",
+    "left",
+    "wide",
+    1,
+    <GpuPanel
+      gpu={metrics.gpu}
+      vramContext={showVramBreakdown ? vramContextFor(spark, fleet) : null}
+      sparkId={spark.id}
+      temperatureUnit={temperatureUnit}
+      chip={spark.hardware.gpuChip}
+      hideMemory={showUnified}
+    />
+  );
+  if (showUnified) add("memory", "left", "small", 2, <UnifiedMemoryPanel um={unified} gpu={metrics.gpu} llm={metrics.llm} />);
+  add(
+    "cpu",
+    "left",
+    "small",
+    2,
+    <CpuPanel cpu={metrics.cpu} hardware={spark.hardware} sparkId={spark.id} temperatureUnit={temperatureUnit} />
+  );
+  // Dedicated hosts have system RAM instead of a unified pool.
+  if (spark.kind === "host") add("ram", "left", "small", 2, <RamPanel ram={metrics.ram} sparkId={spark.id} />);
+  // Windows PCs have no launchers, so no Models block.
+  if (spark.platform !== "windows") add("models", "left", "small", 2, modelsPanel);
+  if (view === "all" && showSvc && llmOn && primaryPort != null) add(`llm:${primaryPort}`, "right", "wide", 3, renderLlmPanel(primaryPort, 0));
+  if (view === "all" && showSvc && comfyPanel) add("comfy", "right", "wide", 4, comfyPanel);
+  if (view === "all" && showSvc && llmOn) {
+    extraPorts.forEach((port, j) => add(`llm:${port}`, "right", "wide", 10 + j, renderLlmPanel(port, j + 1)));
+  }
+  add(
+    "storage",
+    "right",
+    "wide",
+    7,
+    <StoragePanel
+      storage={metrics.storage}
+      sparkId={spark.id}
+      disabledDevices={disabledDevices}
+      onDisabledChange={setDisabledDevices}
+      storagePollDisabled={storagePollDisabled}
+      onStoragePollModeChange={handleStoragePollModeChange}
+    />
+  );
+  add(
+    "network",
+    "right",
+    "wide",
+    8,
+    <NetworkPanel
+      network={metrics.network}
+      sparkId={spark.id}
+      disabledInterfaces={disabledInterfaces}
+      onDisabledChange={setDisabledInterfaces}
+    />
+  );
+  if (metrics.roce && metrics.roce.devices.length > 0) add("roce", "right", "wide", 8, <RocePanel roce={metrics.roce} />);
+  if (tailscaleOn) add("tailscale", "right", "wide", 9, <TailscalePanel tailscale={metrics.tailscale ?? null} />);
+
   return (
     <div className="sp">
       <SparkHeader spark={spark} onEdit={onEdit} />
@@ -255,83 +312,7 @@ export function SparkPage({
       <SparkActions spark={spark} onEdit={onEdit} className="sp-mobile-actions flex sm:hidden" />
       {spark.online ? <HealthList findings={spark.health} /> : null}
 
-      {(
-        /* Two independent columns (xl+): hardware on the left, services + I/O on the
-           right. Below xl everything stacks in the Item order (GPU, memory, LLM first). */
-        <div className="sp-cols">
-          <div className="sp-col">
-            <Item order={1}>
-              <GpuPanel
-                gpu={metrics.gpu}
-                vramContext={showVramBreakdown ? vramContextFor(spark, fleet) : null}
-                sparkId={spark.id}
-                temperatureUnit={temperatureUnit}
-                chip={spark.hardware.gpuChip}
-                hideMemory={showUnified}
-              />
-            </Item>
-            {/* Unified memory (or RAM on a dedicated host) and CPU sit side by side (they stack when the column is narrow). */}
-            <Item order={2}>
-              <div className="sp-pair">
-                {showUnified && <UnifiedMemoryPanel um={unified} gpu={metrics.gpu} llm={metrics.llm} />}
-                <CpuPanel
-                  cpu={metrics.cpu}
-                  hardware={spark.hardware}
-                  sparkId={spark.id}
-                  temperatureUnit={temperatureUnit}
-                />
-                {/* Dedicated hosts have system RAM instead of a unified pool: CPU and RAM side by side. */}
-                {spark.kind === "host" && <RamPanel ram={metrics.ram} sparkId={spark.id} />}
-                {/* Models is the third column of the row (Windows PCs have no launchers). */}
-                {spark.platform !== "windows" && modelsPanel}
-              </div>
-            </Item>
-          </div>
-          <div className="sp-col">
-            {view === "all" && showSvc && llmOn && primaryPort != null && (
-              <Item order={3}>{renderLlmPanel(primaryPort, 0)}</Item>
-            )}
-            {view === "all" && showSvc && comfyPanel && <Item order={4}>{comfyPanel}</Item>}
-            {view === "all" &&
-              showSvc &&
-              llmOn &&
-              extraPorts.map((port, j) => (
-                <Item key={port} order={10 + j}>
-                  {renderLlmPanel(port, j + 1)}
-                </Item>
-              ))}
-            {view === "all" && showSvc && addPort && <Item order={30}>{addPort}</Item>}
-            <Item order={7}>
-              <StoragePanel
-                storage={metrics.storage}
-                sparkId={spark.id}
-                disabledDevices={disabledDevices}
-                onDisabledChange={setDisabledDevices}
-                storagePollDisabled={storagePollDisabled}
-                onStoragePollModeChange={handleStoragePollModeChange}
-              />
-            </Item>
-            <Item order={8}>
-              <NetworkPanel
-                network={metrics.network}
-                sparkId={spark.id}
-                disabledInterfaces={disabledInterfaces}
-                onDisabledChange={setDisabledInterfaces}
-              />
-            </Item>
-            {metrics.roce && metrics.roce.devices.length > 0 && (
-              <Item order={8}>
-                <RocePanel roce={metrics.roce} />
-              </Item>
-            )}
-            {tailscaleOn && (
-              <Item order={9}>
-                <TailscalePanel tailscale={metrics.tailscale ?? null} />
-              </Item>
-            )}
-          </div>
-        </div>
-      )}
+      <SparkLayout blocks={blocks} rightFooter={view === "all" && showSvc ? addPort : null} />
     </div>
   );
 }

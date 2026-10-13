@@ -1,3 +1,4 @@
+import { PanelCollapseControls } from "../ui/PanelCollapseControls";
 import { BenchIcon } from "../bench/BenchIcon";
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import {
@@ -241,6 +242,7 @@ export function AppSidebar({
           <span>Jump to…</span>
           <span className="kbd">Ctrl K</span>
         </button>
+        <PanelCollapseControls compact />
       </div>
 
       <div className="min-h-0">

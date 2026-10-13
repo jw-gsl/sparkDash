@@ -185,13 +185,19 @@
     align-items: start;
   }
   .sp-col {
-    display: flex;
-    flex-direction: column;
+    /* Small blocks (memory, CPU, models) share a row; wide blocks take the whole row. */
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
     gap: var(--sp-gap);
+    align-content: start;
+    align-items: stretch;
     min-width: 0;
   }
   .sp-item {
     order: 0;
+  }
+  .sp-item--wide {
+    grid-column: 1 / -1;
   }
   .sp-services {
     grid-template-columns: repeat(2, minmax(0, 1fr));
