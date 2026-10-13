@@ -389,6 +389,12 @@ export function LlmPanel({
   const prefillAvg = useMemo(() => avgPositive(prefillFull), [prefillFull]);
   const cachedPrefillAvg = useMemo(() => avgPositive(cachedFull), [cachedFull]);
   const uncachedPrefillAvg = useMemo(() => avgPositive(uncachedFull), [uncachedFull]);
+  // Peak over the same window as the averages.
+  const maxOf = (xs: readonly number[]) => (xs.length ? Math.max(...xs) : 0);
+  const genMax = useMemo(() => maxOf(genFull), [genFull]);
+  const prefillMax = useMemo(() => maxOf(prefillFull), [prefillFull]);
+  const cachedPrefillMax = useMemo(() => maxOf(cachedFull), [cachedFull]);
+  const uncachedPrefillMax = useMemo(() => maxOf(uncachedFull), [uncachedFull]);
   const [showSettings, setShowSettings] = useState(false);
   const [portDraft, setPortDraft] = useState(String(llmPort));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
@@ -762,7 +768,11 @@ export function LlmPanel({
                 <small>tok/s</small>
               </div>
               <TrendLine data={genHistory} height={44} color="var(--color-accent)" />
-              {genAvg != null && <span className="sp-avg mono">avg {fmtAvg(genAvg)}</span>}
+              {genAvg != null && (
+                <span className="sp-avg mono">
+                  avg {fmtAvg(genAvg)}{genMax > 0 && <> · max {fmtAvg(genMax)}</>}
+                </span>
+              )}
               {/* Always rendered so the block keeps its height as traffic starts and stops. */}
               {available && (
                 idleNote ? (
@@ -795,7 +805,11 @@ export function LlmPanel({
                 )}
               </div>
               <TrendLine data={prefillHistory} height={44} color="var(--color-info)" />
-              {prefillAvg != null && <span className="sp-avg mono">avg {fmtAvg(prefillAvg)}</span>}
+              {prefillAvg != null && (
+                <span className="sp-avg mono">
+                  avg {fmtAvg(prefillAvg)}{prefillMax > 0 && <> · max {fmtAvg(prefillMax)}</>}
+                </span>
+              )}
             </div>
           </div>
           {showPrefillSplit && (
@@ -810,7 +824,11 @@ export function LlmPanel({
                   <small>tok/s</small>
                 </div>
                 <TrendLine data={cachedPrefillHistory} height={30} color="var(--color-muted)" />
-                {cachedPrefillAvg != null && <span className="sp-avg mono">avg {fmtAvg(cachedPrefillAvg)}</span>}
+                {cachedPrefillAvg != null && (
+                <span className="sp-avg mono">
+                  avg {fmtAvg(cachedPrefillAvg)}{cachedPrefillMax > 0 && <> · max {fmtAvg(cachedPrefillMax)}</>}
+                </span>
+              )}
               </div>
               <div
                 className="sp-metric"
@@ -822,7 +840,11 @@ export function LlmPanel({
                   <small>tok/s</small>
                 </div>
                 <TrendLine data={uncachedPrefillHistory} height={30} color="var(--color-violet)" />
-                {uncachedPrefillAvg != null && <span className="sp-avg mono">avg {fmtAvg(uncachedPrefillAvg)}</span>}
+                {uncachedPrefillAvg != null && (
+                <span className="sp-avg mono">
+                  avg {fmtAvg(uncachedPrefillAvg)}{uncachedPrefillMax > 0 && <> · max {fmtAvg(uncachedPrefillMax)}</>}
+                </span>
+              )}
               </div>
             </div>
           )}
